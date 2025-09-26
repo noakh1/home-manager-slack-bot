@@ -12,7 +12,7 @@ const app = new App({
 const TIMEZONE = 'America/New_York'; // Change to your timezone
 
 // Helper function to format dates in your timezone
-function formatDateInTimezone(date, timezone = TIMEZONE) {
+function formatDateInTimezone(date, timezone = Amsterdam) {
   return new Date(date).toLocaleString('en-US', {
     timeZone: timezone,
     year: 'numeric',
