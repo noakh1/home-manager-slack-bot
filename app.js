@@ -1,18 +1,18 @@
 const { App } = require('@slack/bolt');
 
-// Initialize app with bot token
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: false,
-  processBeforeResponse: true
+  socketMode: false
 });
 
-// In-memory storage
+// Storage
 let groceryList = [];
 let eventsList = [];
 let cleaningTasks = {};
 let maintenanceItems = [];
+
+// Store pinned message timestamps for each channel
 let pinnedMessages = {
   groceries: null,
   events: null,
@@ -22,91 +22,99 @@ let pinnedMessages = {
 
 // Helper function to format grocery list
 function formatGroceryList() {
+  const blocks = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: "🛒 Grocery List" }
+    }
+  ];
+
   if (groceryList.length === 0) {
-    return {
-      blocks: [
-        {
-          type: "header",
-          text: { type: "plain_text", text: "🛒 Grocery List" }
-        },
-        {
-          type: "section",
-          text: { type: "mrkdwn", text: "_No items needed!_" }
-        },
-        {
-          type: "context",
-          elements: [{ type: "mrkdwn", text: "Use `buy: item1, item2` to add items • Use `got: item1, item2` to remove items" }]
-        }
-      ]
-    };
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: "_No items needed! 🎉_" }
+    });
+  } else {
+    const listText = groceryList.map((item, i) => 
+      `${i + 1}. **${item.name}** _(added by ${item.addedBy})_`
+    ).join('\n');
+    
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: listText }
+    });
   }
 
-  const listText = groceryList.map((item, i) => 
-    `${i + 1}. ${item.name} _(added by ${item.addedBy})_`
-  ).join('\n');
+  blocks.push({
+    type: "context",
+    elements: [{ 
+      type: "mrkdwn", 
+      text: "💡 Use `buy: item1, item2` to add • Use `got: item1, item2` to remove" 
+    }]
+  });
 
-  return {
-    blocks: [
-      {
-        type: "header",
-        text: { type: "plain_text", text: "🛒 Grocery List" }
-      },
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: listText }
-      },
-      {
-        type: "context",
-        elements: [{ type: "mrkdwn", text: "Use `buy: item1, item2` to add items • Use `got: item1, item2` to remove items" }]
-      }
-    ]
-  };
+  return { blocks };
 }
 
-// Helper function to update pinned message
-async function updatePinnedMessage(channelId, messageType, content) {
+// Helper function to update or create pinned grocery list
+async function updateGroceryList(channelId, client) {
   try {
-    const oldTs = pinnedMessages[messageType];
+    const content = formatGroceryList();
+    const oldMessageTs = pinnedMessages.groceries;
     
-    if (oldTs) {
-      await app.client.chat.update({
+    if (oldMessageTs) {
+      // Update existing pinned message
+      await client.chat.update({
         channel: channelId,
-        ts: oldTs,
+        ts: oldMessageTs,
         ...content
       });
+      console.log('Updated existing grocery list message');
     } else {
-      const result = await app.client.chat.postMessage({
+      // Create new message and pin it
+      const result = await client.chat.postMessage({
         channel: channelId,
         ...content
       });
       
-      pinnedMessages[messageType] = result.ts;
+      // Save the timestamp and pin the message
+      pinnedMessages.groceries = result.ts;
       
-      await app.client.pins.add({
+      await client.pins.add({
         channel: channelId,
         timestamp: result.ts
       });
+      
+      console.log('Created and pinned new grocery list message');
     }
   } catch (error) {
-    console.error('Error updating pinned message:', error);
+    console.error('Error updating grocery list:', error);
   }
 }
 
-// Listen for messages in channels
+// Listen for messages
 app.message(async ({ message, say, client }) => {
-  // Skip if message is from a bot
+  // Skip bot messages
   if (message.subtype === 'bot_message') return;
   
   const text = message.text?.toLowerCase() || '';
+  
+  // Get channel and user info
   const channelInfo = await client.conversations.info({ channel: message.channel });
   const channelName = channelInfo.channel.name;
   const userInfo = await client.users.info({ user: message.user });
   const userName = userInfo.user.real_name || userInfo.user.name;
 
+  console.log(`Message in #${channelName}: "${text}" by ${userName}`);
+
   // GROCERIES CHANNEL
   if (channelName === 'groceries') {
+    let listChanged = false;
+    
+    // Handle "buy:" command
     if (text.startsWith('buy:')) {
       const items = text.replace('buy:', '').split(',').map(s => s.trim()).filter(s => s);
+      const addedItems = [];
       
       items.forEach(item => {
         if (!groceryList.find(existing => existing.name.toLowerCase() === item.toLowerCase())) {
@@ -115,24 +123,46 @@ app.message(async ({ message, say, client }) => {
             addedBy: userName,
             addedAt: new Date().toISOString()
           });
+          addedItems.push(item);
+          listChanged = true;
         }
       });
 
-      await updatePinnedMessage(message.channel, 'groceries', formatGroceryList());
-      await say(`✅ Added: ${items.join(', ')}`);
+      if (addedItems.length > 0) {
+        await updateGroceryList(message.channel, client);
+        await say(`✅ Added to list: ${addedItems.join(', ')}`);
+      } else {
+        await say(`ℹ️ Items already on the list: ${items.join(', ')}`);
+      }
     }
 
+    // Handle "got:" or "i got:" command
     if (text.startsWith('got:') || text.startsWith('i got:')) {
       const items = text.replace(/^(got:|i got:)/, '').split(',').map(s => s.trim()).filter(s => s);
+      const removedItems = [];
       
       items.forEach(item => {
-        groceryList = groceryList.filter(existing => 
-          existing.name.toLowerCase() !== item.toLowerCase()
+        const index = groceryList.findIndex(existing => 
+          existing.name.toLowerCase() === item.toLowerCase()
         );
+        if (index !== -1) {
+          groceryList.splice(index, 1);
+          removedItems.push(item);
+          listChanged = true;
+        }
       });
 
-      await updatePinnedMessage(message.channel, 'groceries', formatGroceryList());
-      await say(`✅ Removed: ${items.join(', ')}`);
+      if (removedItems.length > 0) {
+        await updateGroceryList(message.channel, client);
+        await say(`✅ Removed from list: ${removedItems.join(', ')}`);
+      } else {
+        await say(`ℹ️ Items not found on list: ${items.join(', ')}`);
+      }
+    }
+
+    // Handle "list" command to show current list
+    if (text === 'list' || text === 'show list') {
+      await updateGroceryList(message.channel, client);
     }
   }
 
@@ -146,29 +176,6 @@ app.message(async ({ message, say, client }) => {
         addedAt: new Date().toISOString()
       });
 
-      const eventsContent = {
-        blocks: [
-          {
-            type: "header",
-            text: { type: "plain_text", text: "📅 Upcoming Events" }
-          },
-          {
-            type: "section",
-            text: { 
-              type: "mrkdwn", 
-              text: eventsList.map((event, i) => 
-                `${i + 1}. ${event.text} _(added by ${event.addedBy})_`
-              ).join('\n') || "_No events scheduled_"
-            }
-          },
-          {
-            type: "context",
-            elements: [{ type: "mrkdwn", text: "Use `event: description` to add events" }]
-          }
-        ]
-      };
-
-      await updatePinnedMessage(message.channel, 'events', eventsContent);
       await say(`📅 Event added: ${eventText}`);
     }
   }
@@ -185,31 +192,6 @@ app.message(async ({ message, say, client }) => {
         };
       });
 
-      const cleaningContent = {
-        blocks: [
-          {
-            type: "header",
-            text: { type: "plain_text", text: "🧹 Cleaning Schedule" }
-          },
-          {
-            type: "section",
-            text: { 
-              type: "mrkdwn", 
-              text: Object.keys(cleaningTasks).map(task => {
-                const info = cleaningTasks[task];
-                const date = new Date(info.lastCleaned).toLocaleDateString();
-                return `• *${task}*: Last cleaned ${date} by ${info.cleanedBy}`;
-              }).join('\n') || "_No cleaning logged yet_"
-            }
-          },
-          {
-            type: "context",
-            elements: [{ type: "mrkdwn", text: "Use `cleaned: kitchen, bathroom` to log cleaning" }]
-          }
-        ]
-      };
-
-      await updatePinnedMessage(message.channel, 'cleaning', cleaningContent);
       await say(`🧹 Logged cleaning: ${tasks.join(', ')}`);
     }
   }
@@ -225,7 +207,6 @@ app.message(async ({ message, say, client }) => {
         completedAt: new Date().toISOString()
       });
 
-      await updateMaintenanceMessage(message.channel);
       await say(`🔧 Completed: ${taskText}`);
     }
 
@@ -238,57 +219,15 @@ app.message(async ({ message, say, client }) => {
         addedAt: new Date().toISOString()
       });
 
-      await updateMaintenanceMessage(message.channel);
       await say(`📋 Added to maintenance: ${taskText}`);
     }
   }
 });
 
-async function updateMaintenanceMessage(channelId) {
-  const pending = maintenanceItems.filter(item => item.status === 'pending');
-  const completed = maintenanceItems.filter(item => item.status === 'completed').slice(-5);
-
-  const maintenanceContent = {
-    blocks: [
-      {
-        type: "header",
-        text: { type: "plain_text", text: "🔧 House Maintenance" }
-      },
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "*Pending Tasks:*" }
-      },
-      {
-        type: "section",
-        text: { 
-          type: "mrkdwn", 
-          text: pending.map((item, i) => 
-            `${i + 1}. ${item.task} _(added by ${item.addedBy})_`
-          ).join('\n') || "_No pending tasks_"
-        }
-      },
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "*Recently Completed:*" }
-      },
-      {
-        type: "section",
-        text: { 
-          type: "mrkdwn", 
-          text: completed.map(item => 
-            `• ${item.task} _(completed by ${item.completedBy})_`
-          ).join('\n') || "_No completed tasks yet_"
-        }
-      },
-      {
-        type: "context",
-        elements: [{ type: "mrkdwn", text: "Use `done: task description` to mark complete • Use `due: task description` to add pending task" }]
-      }
-    ]
-  };
-
-  await updatePinnedMessage(channelId, 'maintenance', maintenanceContent);
-}
+// Test command
+app.message('hello', async ({ say }) => {
+  await say('Hello! I\'m your home manager bot. Try `buy: milk, eggs` in #groceries!');
+});
 
 // Start the app
 (async () => {
