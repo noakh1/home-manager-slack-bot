@@ -623,7 +623,7 @@ cron.schedule('0 * * * *', async () => {
   }
 });
 
-// Main message handler
+// Main message handler with better error handling
 app.message(async ({ message, say, client }) => {
   if (message.subtype === 'bot_message') return;
   
@@ -633,8 +633,16 @@ app.message(async ({ message, say, client }) => {
   try {
     const channelInfo = await client.conversations.info({ channel: message.channel });
     const channelName = channelInfo.channel.name;
-    const userInfo = await client.users.info({ user: message.user });
-    const userName = userInfo.user.real_name || userInfo.user.name;
+    
+    // Better user info handling with fallback
+    let userName = 'Unknown User';
+    try {
+      const userInfo = await client.users.info({ user: message.user });
+      userName = userInfo.user.real_name || userInfo.user.display_name || userInfo.user.name || `User_${message.user}`;
+    } catch (userError) {
+      console.log('Could not get user info for:', message.user, userError.message);
+      userName = `User_${message.user.slice(-4)}`; // Use last 4 chars of user ID as fallback
+    }
 
     channelIds[channelName] = message.channel;
 
@@ -931,9 +939,12 @@ app.message(async ({ message, say, client }) => {
 
   } catch (error) {
     console.error('Error in message handler:', error);
-    await say({
-      text: `❌ Sorry, something went wrong: ${error.message}`
-    }).catch(console.error);
+    // Only show error to user if it's not a user lookup issue
+    if (!error.message.includes('user_not_found')) {
+      await say({
+        text: `❌ Sorry, something went wrong: ${error.message}`
+      }).catch(console.error);
+    }
   }
 });
 
