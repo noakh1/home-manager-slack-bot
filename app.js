@@ -9,10 +9,10 @@ const app = new App({
 });
 
 // TIMEZONE CONFIGURATION - Change this to your timezone
-const TIMEZONE = 'America/New_York'; // Change to your timezone
+const TIMEZONE = 'Amsterdam'; // Change to your timezone
 
 // Helper function to format dates in your timezone
-function formatDateInTimezone(date, timezone = Amsterdam) {
+function formatDateInTimezone(date, timezone = TIMEZONE) {
   return new Date(date).toLocaleString('en-US', {
     timeZone: timezone,
     year: 'numeric',
