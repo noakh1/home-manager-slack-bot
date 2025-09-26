@@ -8,6 +8,36 @@ const app = new App({
   socketMode: false
 });
 
+// TIMEZONE CONFIGURATION - Change this to your timezone
+const TIMEZONE = 'America/New_York'; // Change to your timezone
+
+// Helper function to format dates in your timezone
+function formatDateInTimezone(date, timezone = TIMEZONE) {
+  return new Date(date).toLocaleString('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+}
+
+// Helper function to get current time in your timezone
+function getCurrentTimeInTimezone(timezone = TIMEZONE) {
+  return new Date().toLocaleString('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+}
+
 // Storage
 let groceryList = [];
 let eventsList = [];
@@ -27,9 +57,13 @@ let pendingActions = {};
 let reminderChannelId = null;
 let channelIds = {};
 
-// Helper functions (keeping the same)
-function parseDateTime(text) {
-  const parsed = chrono.parseDate(text);
+// Helper function to parse relative dates with timezone awareness
+function parseDateTime(text, timezone = TIMEZONE) {
+  // Create a reference date in the user's timezone
+  const now = new Date();
+  const referenceDate = new Date(now.toLocaleString('en-US', { timeZone: timezone }));
+  
+  const parsed = chrono.parseDate(text, referenceDate);
   if (parsed) {
     return parsed.toISOString();
   }
@@ -87,7 +121,7 @@ function parseRecurringFrequency(text) {
   return null;
 }
 
-// FIXED: Reminder completion handlers
+// Button action handlers (same as before)
 app.action('complete_reminder', async ({ ack, body, client, say }) => {
   await ack();
   
@@ -95,12 +129,10 @@ app.action('complete_reminder', async ({ ack, body, client, say }) => {
   
   const reminderId = body.actions[0].value;
   
-  // Find reminder in both one-time and recurring arrays
   let reminder = reminders.find(r => r.id === reminderId);
   let isRecurring = false;
   
   if (!reminder) {
-    // Check if it's a recurring reminder
     const recurringMatch = reminderId.match(/^recurring_(.+)_\d+$/);
     if (recurringMatch) {
       const originalId = recurringMatch[1];
@@ -111,7 +143,6 @@ app.action('complete_reminder', async ({ ack, body, client, say }) => {
   
   if (reminder) {
     if (!isRecurring) {
-      // Mark one-time reminder as completed
       reminder.completed = true;
       reminder.completedAt = new Date().toISOString();
       reminder.completedBy = body.user.name;
@@ -119,7 +150,6 @@ app.action('complete_reminder', async ({ ack, body, client, say }) => {
     
     await say(`✅ Reminder completed by <@${body.user.id}>: "${reminder.message}"`);
     
-    // Update the reminder list if we're in the remind-me channel
     const channelInfo = await client.conversations.info({ channel: body.channel.id });
     if (channelInfo.channel.name === 'remind-me') {
       await updateRemindersList(body.channel.id, client);
@@ -129,7 +159,6 @@ app.action('complete_reminder', async ({ ack, body, client, say }) => {
     await say('❌ Reminder not found. It may have already been completed.');
   }
   
-  // Delete the reminder message
   try {
     await client.chat.delete({
       channel: body.channel.id,
@@ -146,19 +175,15 @@ app.action('snooze_reminder', async ({ ack, body, client, say }) => {
   console.log('Snooze reminder button clicked', body.actions[0].value);
   
   const reminderId = body.actions[0].value;
-  
-  // Find reminder (only one-time reminders can be snoozed)
   let reminder = reminders.find(r => r.id === reminderId);
   
   if (reminder) {
-    // Snooze for 1 hour
     const newDueDate = new Date(Date.now() + 60 * 60 * 1000);
     reminder.dueDate = newDueDate.toISOString();
-    reminder.sent = false; // Allow it to be sent again
+    reminder.sent = false;
     
-    await say(`⏰ Reminder snoozed for 1 hour by <@${body.user.id}>: "${reminder.message}"\nWill remind again at ${newDueDate.toLocaleString()}`);
+    await say(`⏰ Reminder snoozed for 1 hour by <@${body.user.id}>: "${reminder.message}"\nWill remind again at ${formatDateInTimezone(newDueDate)}`);
     
-    // Update the reminder list if we're in the remind-me channel
     const channelInfo = await client.conversations.info({ channel: body.channel.id });
     if (channelInfo.channel.name === 'remind-me') {
       await updateRemindersList(body.channel.id, client);
@@ -168,7 +193,6 @@ app.action('snooze_reminder', async ({ ack, body, client, say }) => {
     await say('❌ Reminder not found. It may have already been completed.');
   }
   
-  // Delete the reminder message
   try {
     await client.chat.delete({
       channel: body.channel.id,
@@ -179,7 +203,6 @@ app.action('snooze_reminder', async ({ ack, body, client, say }) => {
   }
 });
 
-// FIXED: Reminder sending function
 async function sendReminder(reminder, client, channelId) {
   const targetText = reminder.targetUser ? reminder.targetUser : '@here';
   
@@ -232,7 +255,7 @@ async function sendReminder(reminder, client, channelId) {
   }
 }
 
-// Reminder list formatting
+// Updated reminder list formatting with timezone-aware dates
 function formatRemindersList() {
   const blocks = [
     {
@@ -251,7 +274,7 @@ function formatRemindersList() {
     });
     
     const overdueText = overdueReminders.map((reminder, i) => 
-      `${i + 1}. **${reminder.message}** _(due ${new Date(reminder.dueDate).toLocaleString()})_\n   👤 For: ${reminder.targetUser || 'Everyone'}`
+      `${i + 1}. **${reminder.message}** _(due ${formatDateInTimezone(reminder.dueDate)})_\n   👤 For: ${reminder.targetUser || 'Everyone'}`
     ).join('\n\n');
     
     blocks.push({
@@ -267,7 +290,7 @@ function formatRemindersList() {
     });
     
     const upcomingText = activeReminders.map((reminder, i) => 
-      `${i + 1}. **${reminder.message}** _(${new Date(reminder.dueDate).toLocaleString()})_\n   👤 For: ${reminder.targetUser || 'Everyone'}`
+      `${i + 1}. **${reminder.message}** _(${formatDateInTimezone(reminder.dueDate)})_\n   👤 For: ${reminder.targetUser || 'Everyone'}`
     ).join('\n\n');
     
     blocks.push({
@@ -303,7 +326,7 @@ function formatRemindersList() {
     type: "context",
     elements: [{ 
       type: "mrkdwn", 
-      text: "💡 Commands:\n• `remind me: take out trash tomorrow at 7pm`\n• `remind Sam: doctor appointment next Friday`\n• `recurring: charge Ring battery every 3 months`\n• `daily: Sam wash your face every morning`" 
+      text: `💡 Commands:\n• \`remind me: take out trash tomorrow at 7pm\`\n• \`remind Sam: doctor appointment next Friday\`\n• \`daily: Sam wash your face every morning\`\n• Current time: ${getCurrentTimeInTimezone()}` 
     }]
   });
 
@@ -339,7 +362,7 @@ async function updateRemindersList(channelId, client) {
   }
 }
 
-// [Include your existing grocery functions]
+// [Include your existing grocery functions - keeping same]
 function formatGroceryList() {
   const blocks = [
     {
@@ -404,7 +427,7 @@ async function updateGroceryList(channelId, client) {
   }
 }
 
-// Cron job to check for due reminders
+// Updated cron jobs with timezone logging
 cron.schedule('* * * * *', async () => {
   if (!reminderChannelId) return;
   
@@ -415,7 +438,9 @@ cron.schedule('* * * * *', async () => {
     !r.sent
   );
   
-  console.log(`Checking reminders: ${dueReminders.length} due now`);
+  if (dueReminders.length > 0) {
+    console.log(`[${getCurrentTimeInTimezone()}] Checking reminders: ${dueReminders.length} due now`);
+  }
   
   for (const reminder of dueReminders) {
     try {
@@ -427,7 +452,6 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
-// Cron job for recurring reminders
 cron.schedule('0 * * * *', async () => {
   if (!reminderChannelId) return;
   
@@ -478,7 +502,7 @@ cron.schedule('0 * * * *', async () => {
         }, app.client, reminderChannelId);
         
         recurring.lastSent = now.toISOString();
-        console.log('Sent recurring reminder:', recurring.message);
+        console.log(`[${getCurrentTimeInTimezone()}] Sent recurring reminder:`, recurring.message);
       } catch (error) {
         console.error('Error sending recurring reminder:', error);
       }
@@ -486,7 +510,7 @@ cron.schedule('0 * * * *', async () => {
   }
 });
 
-// Main message handler
+// Main message handler with timezone-aware date parsing
 app.message(async ({ message, say, client }) => {
   if (message.subtype === 'bot_message') return;
   
@@ -498,7 +522,6 @@ app.message(async ({ message, say, client }) => {
   const userInfo = await client.users.info({ user: message.user });
   const userName = userInfo.user.real_name || userInfo.user.name;
 
-  // Store channel IDs
   channelIds[channelName] = message.channel;
 
   if (channelName === 'remind-me') {
@@ -557,15 +580,21 @@ app.message(async ({ message, say, client }) => {
     }
   }
 
-  // REMIND-ME CHANNEL
+  // REMIND-ME CHANNEL with timezone-aware parsing
   if (channelName === 'remind-me') {
+    // Show current time
+    if (text === 'time' || text === 'timezone') {
+      await say(`🕐 Current time: ${getCurrentTimeInTimezone()}\n🌍 Timezone: ${TIMEZONE}`);
+      return;
+    }
+
     // One-time reminders
     if (text.startsWith('remind me:') || text.startsWith('remind:')) {
       const reminderText = originalText.replace(/^remind( me)?:\s*/i, '').trim();
-      const dueDate = parseDateTime(reminderText);
+      const dueDate = parseDateTime(reminderText, TIMEZONE);
       
       if (!dueDate) {
-        await say('❌ I couldn\'t understand the date/time. Try: `remind me: take out trash tomorrow at 7pm`');
+        await say('❌ I couldn\'t understand the date/time. Try: `remind me: take out trash tomorrow at 7pm`\nCurrent time: ' + getCurrentTimeInTimezone());
         return;
       }
 
@@ -581,7 +610,7 @@ app.message(async ({ message, say, client }) => {
 
       reminders.push(newReminder);
       await updateRemindersList(message.channel, client);
-      await say(`⏰ Reminder set: "${reminderText}" for ${new Date(dueDate).toLocaleString()}`);
+      await say(`⏰ Reminder set: "${reminderText}" for ${formatDateInTimezone(dueDate)}`);
     }
 
     // Reminders for specific people
@@ -590,10 +619,10 @@ app.message(async ({ message, say, client }) => {
       if (match) {
         const targetUser = match[1];
         const reminderText = match[2].trim();
-        const dueDate = parseDateTime(reminderText);
+        const dueDate = parseDateTime(reminderText, TIMEZONE);
         
         if (!dueDate) {
-          await say('❌ I couldn\'t understand the date/time. Try: `remind Sam: doctor appointment next Friday at 2pm`');
+          await say('❌ I couldn\'t understand the date/time. Try: `remind Sam: doctor appointment next Friday at 2pm`\nCurrent time: ' + getCurrentTimeInTimezone());
           return;
         }
 
@@ -610,11 +639,11 @@ app.message(async ({ message, say, client }) => {
 
         reminders.push(newReminder);
         await updateRemindersList(message.channel, client);
-        await say(`⏰ Reminder set for ${targetUser}: "${reminderText}" for ${new Date(dueDate).toLocaleString()}`);
+        await say(`⏰ Reminder set for ${targetUser}: "${reminderText}" for ${formatDateInTimezone(dueDate)}`);
       }
     }
 
-    // Recurring reminders
+    // Recurring reminders (same logic as before)
     if (text.startsWith('recurring:') || text.startsWith('daily:') || text.startsWith('weekly:') || text.startsWith('monthly:')) {
       let reminderText, frequency;
       
@@ -637,7 +666,6 @@ app.message(async ({ message, say, client }) => {
         return;
       }
 
-      // Extract target user if mentioned
       let targetUser = null;
       const userMatch = reminderText.match(/^(\w+)[,:]?\s+(.+)/);
       if (userMatch && !reminderText.toLowerCase().includes('every')) {
@@ -695,7 +723,7 @@ app.message(async ({ message, say, client }) => {
       await updateRemindersList(message.channel, client);
     }
 
-    // Test reminder (for immediate testing)
+    // Test reminder
     if (text.startsWith('test reminder:')) {
       const testMessage = originalText.replace(/^test reminder:\s*/i, '').trim();
       
@@ -713,12 +741,13 @@ app.message(async ({ message, say, client }) => {
 
 app.message('hello', async ({ say, message }) => {
   console.log(`Hello from user: ${message.user}`);
-  await say(`Hello! I\'m your home manager bot.\n• Try \`buy: milk\` in #groceries\n• Try \`test reminder: check if buttons work\` in #remind-me\n• Try \`remind me: test in 1 minute\` in #remind-me`);
+  await say(`Hello! I\'m your home manager bot.\n🕐 Current time: ${getCurrentTimeInTimezone()}\n🌍 Timezone: ${TIMEZONE}\n\n• Try \`buy: milk\` in #groceries\n• Try \`remind me: test in 1 minute\` in #remind-me\n• Try \`time\` to check current time`);
 });
 
 (async () => {
   const port = process.env.PORT || 3000;
   await app.start(port);
   console.log(`⚡️ Home Manager Bot is running on port ${port}!`);
-  console.log('📅 Reminder system active - checking every minute for due reminders');
+  console.log(`📅 Reminder system active in timezone: ${TIMEZONE}`);
+  console.log(`🕐 Current time: ${getCurrentTimeInTimezone()}`);
 })();
