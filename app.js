@@ -24,8 +24,10 @@ let pinnedMessages = {
 };
 
 let pendingActions = {};
+let reminderChannelId = null;
+let channelIds = {};
 
-// Helper function to parse relative dates
+// Helper functions (keeping the same)
 function parseDateTime(text) {
   const parsed = chrono.parseDate(text);
   if (parsed) {
@@ -34,41 +36,36 @@ function parseDateTime(text) {
   return null;
 }
 
-// Helper function to parse recurring frequency
 function parseRecurringFrequency(text) {
   const lowerText = text.toLowerCase();
   
-  // Daily patterns
   if (lowerText.includes('daily') || lowerText.includes('every day')) {
-    return { type: 'daily', cron: '0 9 * * *' }; // 9 AM daily
+    return { type: 'daily', cron: '0 9 * * *' };
   }
   
   if (lowerText.includes('every morning')) {
-    return { type: 'daily', cron: '0 8 * * *' }; // 8 AM daily
+    return { type: 'daily', cron: '0 8 * * *' };
   }
   
   if (lowerText.includes('every evening') || lowerText.includes('every night')) {
-    return { type: 'daily', cron: '0 20 * * *' }; // 8 PM daily
+    return { type: 'daily', cron: '0 20 * * *' };
   }
   
-  // Weekly patterns
   if (lowerText.includes('weekly') || lowerText.includes('every week')) {
-    return { type: 'weekly', cron: '0 9 * * 1' }; // 9 AM Mondays
+    return { type: 'weekly', cron: '0 9 * * 1' };
   }
   
   const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   for (let i = 0; i < weekdays.length; i++) {
     if (lowerText.includes(`every ${weekdays[i]}`)) {
-      return { type: 'weekly', cron: `0 9 * * ${i}` }; // 9 AM on that day
+      return { type: 'weekly', cron: `0 9 * * ${i}` };
     }
   }
   
-  // Monthly patterns
   if (lowerText.includes('monthly') || lowerText.includes('every month')) {
-    return { type: 'monthly', cron: '0 9 1 * *' }; // 9 AM 1st of month
+    return { type: 'monthly', cron: '0 9 1 * *' };
   }
   
-  // Custom intervals
   const monthMatch = lowerText.match(/every (\d+) months?/);
   if (monthMatch) {
     const months = parseInt(monthMatch[1]);
@@ -90,7 +87,152 @@ function parseRecurringFrequency(text) {
   return null;
 }
 
-// Helper function to format reminders list
+// FIXED: Reminder completion handlers
+app.action('complete_reminder', async ({ ack, body, client, say }) => {
+  await ack();
+  
+  console.log('Complete reminder button clicked', body.actions[0].value);
+  
+  const reminderId = body.actions[0].value;
+  
+  // Find reminder in both one-time and recurring arrays
+  let reminder = reminders.find(r => r.id === reminderId);
+  let isRecurring = false;
+  
+  if (!reminder) {
+    // Check if it's a recurring reminder
+    const recurringMatch = reminderId.match(/^recurring_(.+)_\d+$/);
+    if (recurringMatch) {
+      const originalId = recurringMatch[1];
+      reminder = recurringReminders.find(r => r.id === originalId);
+      isRecurring = true;
+    }
+  }
+  
+  if (reminder) {
+    if (!isRecurring) {
+      // Mark one-time reminder as completed
+      reminder.completed = true;
+      reminder.completedAt = new Date().toISOString();
+      reminder.completedBy = body.user.name;
+    }
+    
+    await say(`✅ Reminder completed by <@${body.user.id}>: "${reminder.message}"`);
+    
+    // Update the reminder list if we're in the remind-me channel
+    const channelInfo = await client.conversations.info({ channel: body.channel.id });
+    if (channelInfo.channel.name === 'remind-me') {
+      await updateRemindersList(body.channel.id, client);
+    }
+  } else {
+    console.log('Reminder not found:', reminderId);
+    await say('❌ Reminder not found. It may have already been completed.');
+  }
+  
+  // Delete the reminder message
+  try {
+    await client.chat.delete({
+      channel: body.channel.id,
+      ts: body.message.ts
+    });
+  } catch (error) {
+    console.log('Could not delete reminder message:', error.message);
+  }
+});
+
+app.action('snooze_reminder', async ({ ack, body, client, say }) => {
+  await ack();
+  
+  console.log('Snooze reminder button clicked', body.actions[0].value);
+  
+  const reminderId = body.actions[0].value;
+  
+  // Find reminder (only one-time reminders can be snoozed)
+  let reminder = reminders.find(r => r.id === reminderId);
+  
+  if (reminder) {
+    // Snooze for 1 hour
+    const newDueDate = new Date(Date.now() + 60 * 60 * 1000);
+    reminder.dueDate = newDueDate.toISOString();
+    reminder.sent = false; // Allow it to be sent again
+    
+    await say(`⏰ Reminder snoozed for 1 hour by <@${body.user.id}>: "${reminder.message}"\nWill remind again at ${newDueDate.toLocaleString()}`);
+    
+    // Update the reminder list if we're in the remind-me channel
+    const channelInfo = await client.conversations.info({ channel: body.channel.id });
+    if (channelInfo.channel.name === 'remind-me') {
+      await updateRemindersList(body.channel.id, client);
+    }
+  } else {
+    console.log('Reminder not found for snoozing:', reminderId);
+    await say('❌ Reminder not found. It may have already been completed.');
+  }
+  
+  // Delete the reminder message
+  try {
+    await client.chat.delete({
+      channel: body.channel.id,
+      ts: body.message.ts
+    });
+  } catch (error) {
+    console.log('Could not delete reminder message:', error.message);
+  }
+});
+
+// FIXED: Reminder sending function
+async function sendReminder(reminder, client, channelId) {
+  const targetText = reminder.targetUser ? reminder.targetUser : '@here';
+  
+  console.log('Sending reminder:', reminder.id, reminder.message);
+  
+  const blocks = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `⏰ **Reminder for ${targetText}:**\n${reminder.message}`
+      }
+    },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: "✅ Mark Complete",
+            emoji: true
+          },
+          style: "primary",
+          value: reminder.id,
+          action_id: "complete_reminder"
+        },
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: "⏰ Snooze 1hr",
+            emoji: true
+          },
+          value: reminder.id,
+          action_id: "snooze_reminder"
+        }
+      ]
+    }
+  ];
+
+  try {
+    await client.chat.postMessage({
+      channel: channelId,
+      blocks: blocks
+    });
+    console.log('Reminder sent successfully');
+  } catch (error) {
+    console.error('Error sending reminder:', error);
+  }
+}
+
+// Reminder list formatting
 function formatRemindersList() {
   const blocks = [
     {
@@ -99,8 +241,7 @@ function formatRemindersList() {
     }
   ];
 
-  // One-time reminders
-  const activeReminders = reminders.filter(r => new Date(r.dueDate) > new Date());
+  const activeReminders = reminders.filter(r => new Date(r.dueDate) > new Date() && !r.completed);
   const overdueReminders = reminders.filter(r => new Date(r.dueDate) <= new Date() && !r.completed);
 
   if (overdueReminders.length > 0) {
@@ -135,7 +276,6 @@ function formatRemindersList() {
     });
   }
 
-  // Recurring reminders
   if (recurringReminders.length > 0) {
     blocks.push({
       type: "section",
@@ -199,199 +339,7 @@ async function updateRemindersList(channelId, client) {
   }
 }
 
-// Function to send reminder with completion button
-async function sendReminder(reminder, client, channelId) {
-  const targetText = reminder.targetUser ? `<@${reminder.targetUser}>` : '@here';
-  
-  const blocks = [
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `⏰ **Reminder for ${targetText}:**\n${reminder.message}`
-      }
-    },
-    {
-      type: "actions",
-      elements: [
-        {
-          type: "button",
-          text: {
-            type: "plain_text",
-            text: "✅ Mark Complete",
-            emoji: true
-          },
-          style: "primary",
-          value: reminder.id,
-          action_id: "complete_reminder"
-        },
-        {
-          type: "button",
-          text: {
-            type: "plain_text",
-            text: "⏰ Snooze 1hr",
-            emoji: true
-          },
-          value: reminder.id,
-          action_id: "snooze_reminder"
-        }
-      ]
-    }
-  ];
-
-  await client.chat.postMessage({
-    channel: channelId,
-    blocks: blocks
-  });
-}
-
-// Handle reminder completion
-app.action('complete_reminder', async ({ ack, body, client, say }) => {
-  await ack();
-  
-  const reminderId = body.actions[0].value;
-  const reminder = reminders.find(r => r.id === reminderId);
-  
-  if (reminder) {
-    reminder.completed = true;
-    reminder.completedAt = new Date().toISOString();
-    reminder.completedBy = body.user.name;
-    
-    await say(`✅ Reminder completed by <@${body.user.id}>: "${reminder.message}"`);
-    
-    // Update the reminder list if we're in the reminders channel
-    const channelInfo = await client.conversations.info({ channel: body.channel.id });
-    if (channelInfo.channel.name === 'remind-me') {
-      await updateRemindersList(body.channel.id, client);
-    }
-  }
-  
-  // Delete the reminder message
-  try {
-    await client.chat.delete({
-      channel: body.channel.id,
-      ts: body.message.ts
-    });
-  } catch (error) {
-    console.log('Could not delete reminder message');
-  }
-});
-
-// Handle reminder snoozing
-app.action('snooze_reminder', async ({ ack, body, client, say }) => {
-  await ack();
-  
-  const reminderId = body.actions[0].value;
-  const reminder = reminders.find(r => r.id === reminderId);
-  
-  if (reminder) {
-    // Snooze for 1 hour
-    reminder.dueDate = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    
-    await say(`⏰ Reminder snoozed for 1 hour by <@${body.user.id}>: "${reminder.message}"`);
-    
-    // Update the reminder list if we're in the reminders channel
-    const channelInfo = await client.conversations.info({ channel: body.channel.id });
-    if (channelInfo.channel.name === 'remind-me') {
-      await updateRemindersList(body.channel.id, client);
-    }
-  }
-  
-  // Delete the reminder message
-  try {
-    await client.chat.delete({
-      channel: body.channel.id,
-      ts: body.message.ts
-    });
-  } catch (error) {
-    console.log('Could not delete reminder message');
-  }
-});
-
-// Store channel ID for reminders (we need this for the cron job)
-let reminderChannelId = null;
-
-// Cron job to check for due reminders
-cron.schedule('* * * * *', async () => { // Check every minute
-  if (!reminderChannelId) return;
-  
-  const now = new Date();
-  const dueReminders = reminders.filter(r => 
-    new Date(r.dueDate) <= now && 
-    !r.completed && 
-    !r.sent
-  );
-  
-  for (const reminder of dueReminders) {
-    try {
-      await sendReminder(reminder, app.client, reminderChannelId);
-      reminder.sent = true;
-    } catch (error) {
-      console.error('Error sending reminder:', error);
-    }
-  }
-});
-
-// Cron job for recurring reminders
-cron.schedule('0 * * * *', async () => { // Check every hour
-  if (!reminderChannelId) return;
-  
-  for (const recurring of recurringReminders) {
-    const now = new Date();
-    const lastSent = recurring.lastSent ? new Date(recurring.lastSent) : new Date(0);
-    
-    let shouldSend = false;
-    
-    switch (recurring.frequency.type) {
-      case 'daily':
-        shouldSend = now.getDate() !== lastSent.getDate();
-        break;
-      case 'weekly':
-        shouldSend = (now.getTime() - lastSent.getTime()) >= (7 * 24 * 60 * 60 * 1000);
-        break;
-      case 'monthly':
-        shouldSend = now.getMonth() !== lastSent.getMonth() || now.getFullYear() !== lastSent.getFullYear();
-        break;
-      case 'custom':
-        const interval = recurring.frequency.interval;
-        const unit = recurring.frequency.unit;
-        let millisecondsInterval;
-        
-        switch (unit) {
-          case 'days':
-            millisecondsInterval = interval * 24 * 60 * 60 * 1000;
-            break;
-          case 'weeks':
-            millisecondsInterval = interval * 7 * 24 * 60 * 60 * 1000;
-            break;
-          case 'months':
-            millisecondsInterval = interval * 30 * 24 * 60 * 60 * 1000; // Approximate
-            break;
-        }
-        
-        shouldSend = (now.getTime() - lastSent.getTime()) >= millisecondsInterval;
-        break;
-    }
-    
-    if (shouldSend) {
-      try {
-        await sendReminder({
-          id: `recurring_${recurring.id}_${Date.now()}`,
-          message: recurring.message,
-          targetUser: recurring.targetUser
-        }, app.client, reminderChannelId);
-        
-        recurring.lastSent = now.toISOString();
-      } catch (error) {
-        console.error('Error sending recurring reminder:', error);
-      }
-    }
-  }
-});
-
-// Include all your existing code for groceries, events, etc.
-// [Previous grocery and events code here - keeping it the same]
-
+// [Include your existing grocery functions]
 function formatGroceryList() {
   const blocks = [
     {
@@ -456,120 +404,87 @@ async function updateGroceryList(channelId, client) {
   }
 }
 
-// Calendar link functions (keeping the same)
-function generateCalendarLinks(eventName, dateTime, description = '') {
-  const startDate = new Date(dateTime);
-  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+// Cron job to check for due reminders
+cron.schedule('* * * * *', async () => {
+  if (!reminderChannelId) return;
   
-  const formatDate = (date) => {
-    return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-  };
+  const now = new Date();
+  const dueReminders = reminders.filter(r => 
+    new Date(r.dueDate) <= now && 
+    !r.completed && 
+    !r.sent
+  );
   
-  const startFormatted = formatDate(startDate);
-  const endFormatted = formatDate(endDate);
+  console.log(`Checking reminders: ${dueReminders.length} due now`);
   
-  const params = new URLSearchParams({
-    action: 'TEMPLATE',
-    text: eventName,
-    dates: `${startFormatted}/${endFormatted}`,
-    details: description || `Added via Slack Home Manager Bot`,
-    ctz: 'America/New_York'
-  });
-  
-  const googleLink = `https://calendar.google.com/calendar/render?${params.toString()}`;
-  
-  const outlookParams = new URLSearchParams({
-    subject: eventName,
-    startdt: startDate.toISOString(),
-    enddt: endDate.toISOString(),
-    body: description || 'Added via Slack Home Manager Bot'
-  });
-  const outlookLink = `https://outlook.live.com/calendar/0/deeplink/compose?${outlookParams.toString()}`;
-  
-  const yahooParams = new URLSearchParams({
-    v: '60',
-    title: eventName,
-    st: Math.floor(startDate.getTime() / 1000),
-    dur: '0100',
-    desc: description || 'Added via Slack Home Manager Bot'
-  });
-  const yahooLink = `https://calendar.yahoo.com/?${yahooParams.toString()}`;
-  
-  return { googleLink, outlookLink, yahooLink };
-}
-
-function formatEventsList() {
-  const blocks = [
-    {
-      type: "header",
-      text: { type: "plain_text", text: "📅 Upcoming Events" }
+  for (const reminder of dueReminders) {
+    try {
+      await sendReminder(reminder, app.client, reminderChannelId);
+      reminder.sent = true;
+    } catch (error) {
+      console.error('Error sending reminder:', error);
     }
-  ];
+  }
+});
 
-  if (eventsList.length === 0) {
-    blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text: "_No events scheduled! 📭_" }
-    });
-  } else {
-    const listText = eventsList.map((event, i) => {
-      const date = event.dateTime ? new Date(event.dateTime).toLocaleString() : 'No date set';
-      const calendarLinks = event.dateTime ? generateCalendarLinks(event.name, event.dateTime) : null;
-      
-      let eventText = `${i + 1}. **${event.name}**\n   📅 ${date}\n   👤 _Added by ${event.addedBy}_`;
-      
-      if (calendarLinks) {
-        eventText += `\n   🔗 <${calendarLinks.googleLink}|Add to Google Calendar> | <${calendarLinks.outlookLink}|Outlook> | <${calendarLinks.yahooLink}|Yahoo>`;
+// Cron job for recurring reminders
+cron.schedule('0 * * * *', async () => {
+  if (!reminderChannelId) return;
+  
+  for (const recurring of recurringReminders) {
+    const now = new Date();
+    const lastSent = recurring.lastSent ? new Date(recurring.lastSent) : new Date(0);
+    
+    let shouldSend = false;
+    
+    switch (recurring.frequency.type) {
+      case 'daily':
+        shouldSend = now.getDate() !== lastSent.getDate() || now.getMonth() !== lastSent.getMonth();
+        break;
+      case 'weekly':
+        shouldSend = (now.getTime() - lastSent.getTime()) >= (7 * 24 * 60 * 60 * 1000);
+        break;
+      case 'monthly':
+        shouldSend = now.getMonth() !== lastSent.getMonth() || now.getFullYear() !== lastSent.getFullYear();
+        break;
+      case 'custom':
+        const interval = recurring.frequency.interval;
+        const unit = recurring.frequency.unit;
+        let millisecondsInterval;
+        
+        switch (unit) {
+          case 'days':
+            millisecondsInterval = interval * 24 * 60 * 60 * 1000;
+            break;
+          case 'weeks':
+            millisecondsInterval = interval * 7 * 24 * 60 * 60 * 1000;
+            break;
+          case 'months':
+            millisecondsInterval = interval * 30 * 24 * 60 * 60 * 1000;
+            break;
+        }
+        
+        shouldSend = (now.getTime() - lastSent.getTime()) >= millisecondsInterval;
+        break;
+    }
+    
+    if (shouldSend) {
+      try {
+        const recurringReminderId = `recurring_${recurring.id}_${Date.now()}`;
+        await sendReminder({
+          id: recurringReminderId,
+          message: recurring.message,
+          targetUser: recurring.targetUser
+        }, app.client, reminderChannelId);
+        
+        recurring.lastSent = now.toISOString();
+        console.log('Sent recurring reminder:', recurring.message);
+      } catch (error) {
+        console.error('Error sending recurring reminder:', error);
       }
-      
-      return eventText;
-    }).join('\n\n');
-    
-    blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text: listText }
-    });
-  }
-
-  blocks.push({
-    type: "context",
-    elements: [{ 
-      type: "mrkdwn", 
-      text: "💡 Commands:\n• `event: Meeting tomorrow at 2pm`\n• `remove event: Meeting`\n• `update event: Meeting -> Wednesday at 3pm`" 
-    }]
-  });
-
-  return { blocks };
-}
-
-async function updateEventsList(channelId, client) {
-  try {
-    const content = formatEventsList();
-    const oldMessageTs = pinnedMessages.events;
-    
-    if (oldMessageTs) {
-      await client.chat.update({
-        channel: channelId,
-        ts: oldMessageTs,
-        ...content
-      });
-    } else {
-      const result = await client.chat.postMessage({
-        channel: channelId,
-        ...content
-      });
-      
-      pinnedMessages.events = result.ts;
-      
-      await client.pins.add({
-        channel: channelId,
-        timestamp: result.ts
-      });
     }
-  } catch (error) {
-    console.error('Error updating events list:', error);
   }
-}
+});
 
 // Main message handler
 app.message(async ({ message, say, client }) => {
@@ -583,12 +498,14 @@ app.message(async ({ message, say, client }) => {
   const userInfo = await client.users.info({ user: message.user });
   const userName = userInfo.user.real_name || userInfo.user.name;
 
-  // Set reminder channel ID when we're in the remind-me channel
+  // Store channel IDs
+  channelIds[channelName] = message.channel;
+
   if (channelName === 'remind-me') {
     reminderChannelId = message.channel;
   }
 
-  // GROCERIES CHANNEL (same as before)
+  // GROCERIES CHANNEL
   if (channelName === 'groceries') {
     if (text.startsWith('buy:')) {
       const items = text.replace('buy:', '').split(',').map(s => s.trim()).filter(s => s);
@@ -640,15 +557,7 @@ app.message(async ({ message, say, client }) => {
     }
   }
 
-  // EVENTS CHANNEL (same as before - keeping the existing events functionality)
-  if (channelName === 'events') {
-    // [Keep all the existing events code here]
-    if (text === 'events') {
-      await updateEventsList(message.channel, client);
-    }
-  }
-
-  // REMIND-ME CHANNEL (new functionality)
+  // REMIND-ME CHANNEL
   if (channelName === 'remind-me') {
     // One-time reminders
     if (text.startsWith('remind me:') || text.startsWith('remind:')) {
@@ -757,7 +666,6 @@ app.message(async ({ message, say, client }) => {
     if (text.startsWith('remove reminder:') || text.startsWith('delete reminder:')) {
       const searchText = originalText.replace(/^(remove|delete) reminder:\s*/i, '').trim().toLowerCase();
       
-      // Try to find and remove one-time reminder
       const reminderIndex = reminders.findIndex(r => 
         r.message.toLowerCase().includes(searchText)
       );
@@ -769,7 +677,6 @@ app.message(async ({ message, say, client }) => {
         return;
       }
       
-      // Try to find and remove recurring reminder
       const recurringIndex = recurringReminders.findIndex(r => 
         r.message.toLowerCase().includes(searchText)
       );
@@ -784,18 +691,31 @@ app.message(async ({ message, say, client }) => {
       await say(`❌ Reminder not found: "${searchText}"`);
     }
 
-    // Show reminders
     if (text === 'reminders' || text === 'list reminders') {
       await updateRemindersList(message.channel, client);
+    }
+
+    // Test reminder (for immediate testing)
+    if (text.startsWith('test reminder:')) {
+      const testMessage = originalText.replace(/^test reminder:\s*/i, '').trim();
+      
+      const testReminder = {
+        id: `test_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        message: testMessage || 'Test reminder',
+        targetUser: null
+      };
+      
+      await sendReminder(testReminder, client, message.channel);
+      await say('📧 Test reminder sent! Try clicking the buttons.');
     }
   }
 });
 
-app.message('hello', async ({ say }) => {
-  await say('Hello! I\'m your home manager bot.\n• Try `buy: milk` in #groceries\n• Try `event: meeting tomorrow at 2pm` in #events\n• Try `remind me: take out trash tomorrow at 7pm` in #remind-me');
+app.message('hello', async ({ say, message }) => {
+  console.log(`Hello from user: ${message.user}`);
+  await say(`Hello! I\'m your home manager bot.\n• Try \`buy: milk\` in #groceries\n• Try \`test reminder: check if buttons work\` in #remind-me\n• Try \`remind me: test in 1 minute\` in #remind-me`);
 });
 
-// Start the app
 (async () => {
   const port = process.env.PORT || 3000;
   await app.start(port);
