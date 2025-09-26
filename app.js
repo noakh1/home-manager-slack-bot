@@ -8,10 +8,10 @@ const app = new App({
   socketMode: false
 });
 
-// TIMEZONE CONFIGURATION - Change this to your timezone
-const TIMEZONE = 'Europe/Amsterdam'; // Change to your timezone
+// TIMEZONE CONFIGURATION
+const TIMEZONE = 'Europe/Amsterdam';
 
-// Helper function to format dates in your timezone
+// Helper functions
 function formatDateInTimezone(date, timezone = TIMEZONE) {
   return new Date(date).toLocaleString('en-US', {
     timeZone: timezone,
@@ -24,7 +24,6 @@ function formatDateInTimezone(date, timezone = TIMEZONE) {
   });
 }
 
-// Helper function to get current time in your timezone
 function getCurrentTimeInTimezone(timezone = TIMEZONE) {
   return new Date().toLocaleString('en-US', {
     timeZone: timezone,
@@ -57,9 +56,7 @@ let pendingActions = {};
 let reminderChannelId = null;
 let channelIds = {};
 
-// Helper function to parse relative dates with timezone awareness
 function parseDateTime(text, timezone = TIMEZONE) {
-  // Create a reference date in the user's timezone
   const now = new Date();
   const referenceDate = new Date(now.toLocaleString('en-US', { timeZone: timezone }));
   
@@ -121,7 +118,114 @@ function parseRecurringFrequency(text) {
   return null;
 }
 
-// Button action handlers (same as before)
+// Calendar links generation
+function generateCalendarLinks(eventName, dateTime, description = '') {
+  const startDate = new Date(dateTime);
+  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+  
+  const formatDate = (date) => {
+    return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  };
+  
+  const startFormatted = formatDate(startDate);
+  const endFormatted = formatDate(endDate);
+  
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: eventName,
+    dates: `${startFormatted}/${endFormatted}`,
+    details: description || `Added via Slack Home Manager Bot`,
+    ctz: TIMEZONE
+  });
+  
+  const googleLink = `https://calendar.google.com/calendar/render?${params.toString()}`;
+  
+  const outlookParams = new URLSearchParams({
+    subject: eventName,
+    startdt: startDate.toISOString(),
+    enddt: endDate.toISOString(),
+    body: description || 'Added via Slack Home Manager Bot'
+  });
+  const outlookLink = `https://outlook.live.com/calendar/0/deeplink/compose?${outlookParams.toString()}`;
+  
+  return { googleLink, outlookLink };
+}
+
+// Events list formatting
+function formatEventsList() {
+  const blocks = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: "📅 Upcoming Events" }
+    }
+  ];
+
+  if (eventsList.length === 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: "_No events scheduled! 📭_" }
+    });
+  } else {
+    const listText = eventsList.map((event, i) => {
+      const date = event.dateTime ? formatDateInTimezone(event.dateTime) : 'No date set';
+      const calendarLinks = event.dateTime ? generateCalendarLinks(event.name, event.dateTime) : null;
+      
+      let eventText = `${i + 1}. **${event.name}**\n   📅 ${date}\n   👤 _Added by ${event.addedBy}_`;
+      
+      if (calendarLinks) {
+        eventText += `\n   🔗 <${calendarLinks.googleLink}|Google Calendar> | <${calendarLinks.outlookLink}|Outlook>`;
+      }
+      
+      return eventText;
+    }).join('\n\n');
+    
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: listText }
+    });
+  }
+
+  blocks.push({
+    type: "context",
+    elements: [{ 
+      type: "mrkdwn", 
+      text: "💡 Commands:\n• `event: Meeting tomorrow at 2pm`\n• `remove event: Meeting`\n• Current time: " + getCurrentTimeInTimezone()
+    }]
+  });
+
+  return { blocks };
+}
+
+async function updateEventsList(channelId, client) {
+  try {
+    const content = formatEventsList();
+    const oldMessageTs = pinnedMessages.events;
+    
+    if (oldMessageTs) {
+      await client.chat.update({
+        channel: channelId,
+        ts: oldMessageTs,
+        ...content
+      });
+    } else {
+      const result = await client.chat.postMessage({
+        channel: channelId,
+        ...content
+      });
+      
+      pinnedMessages.events = result.ts;
+      
+      await client.pins.add({
+        channel: channelId,
+        timestamp: result.ts
+      });
+    }
+  } catch (error) {
+    console.error('Error updating events list:', error);
+  }
+}
+
+// Button action handlers
 app.action('complete_reminder', async ({ ack, body, client, say }) => {
   await ack();
   
@@ -148,7 +252,9 @@ app.action('complete_reminder', async ({ ack, body, client, say }) => {
       reminder.completedBy = body.user.name;
     }
     
-    await say(`✅ Reminder completed by <@${body.user.id}>: "${reminder.message}"`);
+    await say({
+      text: `✅ Reminder completed by <@${body.user.id}>: "${reminder.message}"`
+    });
     
     const channelInfo = await client.conversations.info({ channel: body.channel.id });
     if (channelInfo.channel.name === 'remind-me') {
@@ -156,7 +262,9 @@ app.action('complete_reminder', async ({ ack, body, client, say }) => {
     }
   } else {
     console.log('Reminder not found:', reminderId);
-    await say('❌ Reminder not found. It may have already been completed.');
+    await say({
+      text: '❌ Reminder not found. It may have already been completed.'
+    });
   }
   
   try {
@@ -182,7 +290,9 @@ app.action('snooze_reminder', async ({ ack, body, client, say }) => {
     reminder.dueDate = newDueDate.toISOString();
     reminder.sent = false;
     
-    await say(`⏰ Reminder snoozed for 1 hour by <@${body.user.id}>: "${reminder.message}"\nWill remind again at ${formatDateInTimezone(newDueDate)}`);
+    await say({
+      text: `⏰ Reminder snoozed for 1 hour by <@${body.user.id}>: "${reminder.message}"\nWill remind again at ${formatDateInTimezone(newDueDate)}`
+    });
     
     const channelInfo = await client.conversations.info({ channel: body.channel.id });
     if (channelInfo.channel.name === 'remind-me') {
@@ -190,7 +300,9 @@ app.action('snooze_reminder', async ({ ack, body, client, say }) => {
     }
   } else {
     console.log('Reminder not found for snoozing:', reminderId);
-    await say('❌ Reminder not found. It may have already been completed.');
+    await say({
+      text: '❌ Reminder not found. It may have already been completed.'
+    });
   }
   
   try {
@@ -247,7 +359,8 @@ async function sendReminder(reminder, client, channelId) {
   try {
     await client.chat.postMessage({
       channel: channelId,
-      blocks: blocks
+      blocks: blocks,
+      text: `Reminder: ${reminder.message}` // Adding text fallback
     });
     console.log('Reminder sent successfully');
   } catch (error) {
@@ -255,7 +368,7 @@ async function sendReminder(reminder, client, channelId) {
   }
 }
 
-// Updated reminder list formatting with timezone-aware dates
+// Reminder list formatting
 function formatRemindersList() {
   const blocks = [
     {
@@ -362,7 +475,7 @@ async function updateRemindersList(channelId, client) {
   }
 }
 
-// [Include your existing grocery functions - keeping same]
+// Grocery functions
 function formatGroceryList() {
   const blocks = [
     {
@@ -427,7 +540,7 @@ async function updateGroceryList(channelId, client) {
   }
 }
 
-// Updated cron jobs with timezone logging
+// Cron jobs
 cron.schedule('* * * * *', async () => {
   if (!reminderChannelId) return;
   
@@ -510,119 +623,155 @@ cron.schedule('0 * * * *', async () => {
   }
 });
 
-// Main message handler with timezone-aware date parsing
+// Main message handler
 app.message(async ({ message, say, client }) => {
   if (message.subtype === 'bot_message') return;
   
   const text = message.text?.toLowerCase() || '';
   const originalText = message.text || '';
   
-  const channelInfo = await client.conversations.info({ channel: message.channel });
-  const channelName = channelInfo.channel.name;
-  const userInfo = await client.users.info({ user: message.user });
-  const userName = userInfo.user.real_name || userInfo.user.name;
+  try {
+    const channelInfo = await client.conversations.info({ channel: message.channel });
+    const channelName = channelInfo.channel.name;
+    const userInfo = await client.users.info({ user: message.user });
+    const userName = userInfo.user.real_name || userInfo.user.name;
 
-  channelIds[channelName] = message.channel;
+    channelIds[channelName] = message.channel;
 
-  if (channelName === 'remind-me') {
-    reminderChannelId = message.channel;
-  }
+    if (channelName === 'remind-me') {
+      reminderChannelId = message.channel;
+    }
 
-  // GROCERIES CHANNEL
-  if (channelName === 'groceries') {
-    if (text.startsWith('buy:')) {
-      const items = text.replace('buy:', '').split(',').map(s => s.trim()).filter(s => s);
-      const addedItems = [];
-      
-      items.forEach(item => {
-        if (!groceryList.find(existing => existing.name.toLowerCase() === item.toLowerCase())) {
-          groceryList.push({
-            name: item,
-            addedBy: userName,
-            addedAt: new Date().toISOString()
+    // GROCERIES CHANNEL
+    if (channelName === 'groceries') {
+      if (text.startsWith('buy:')) {
+        const items = text.replace('buy:', '').split(',').map(s => s.trim()).filter(s => s);
+        const addedItems = [];
+        
+        items.forEach(item => {
+          if (!groceryList.find(existing => existing.name.toLowerCase() === item.toLowerCase())) {
+            groceryList.push({
+              name: item,
+              addedBy: userName,
+              addedAt: new Date().toISOString()
+            });
+            addedItems.push(item);
+          }
+        });
+
+        if (addedItems.length > 0) {
+          await updateGroceryList(message.channel, client);
+          await say({
+            text: `✅ Added to list: ${addedItems.join(', ')}`
           });
-          addedItems.push(item);
+        } else {
+          await say({
+            text: `ℹ️ Items already on the list: ${items.join(', ')}`
+          });
         }
-      });
+      }
 
-      if (addedItems.length > 0) {
+      if (text.startsWith('got:') || text.startsWith('i got:')) {
+        const items = text.replace(/^(got:|i got:)/, '').split(',').map(s => s.trim()).filter(s => s);
+        const removedItems = [];
+        
+        items.forEach(item => {
+          const index = groceryList.findIndex(existing => 
+            existing.name.toLowerCase() === item.toLowerCase()
+          );
+          if (index !== -1) {
+            groceryList.splice(index, 1);
+            removedItems.push(item);
+          }
+        });
+
+        if (removedItems.length > 0) {
+          await updateGroceryList(message.channel, client);
+          await say({
+            text: `✅ Removed from list: ${removedItems.join(', ')}`
+          });
+        } else {
+          await say({
+            text: `ℹ️ Items not found on list: ${items.join(', ')}`
+          });
+        }
+      }
+
+      if (text === 'list') {
         await updateGroceryList(message.channel, client);
-        await say(`✅ Added to list: ${addedItems.join(', ')}`);
-      } else {
-        await say(`ℹ️ Items already on the list: ${items.join(', ')}`);
       }
     }
 
-    if (text.startsWith('got:') || text.startsWith('i got:')) {
-      const items = text.replace(/^(got:|i got:)/, '').split(',').map(s => s.trim()).filter(s => s);
-      const removedItems = [];
-      
-      items.forEach(item => {
-        const index = groceryList.findIndex(existing => 
-          existing.name.toLowerCase() === item.toLowerCase()
+    // EVENTS CHANNEL
+    if (channelName === 'events') {
+      if (text.startsWith('event:')) {
+        const eventText = originalText.replace(/^event:\s*/i, '').trim();
+        const dateTime = parseDateTime(eventText, TIMEZONE);
+        
+        if (!dateTime) {
+          await say({
+            text: `❌ I couldn't understand the date/time. Try: \`event: Meeting tomorrow at 2pm\`\nCurrent time: ${getCurrentTimeInTimezone()}`
+          });
+          return;
+        }
+
+        const newEvent = {
+          name: eventText,
+          dateTime: dateTime,
+          addedBy: userName,
+          addedAt: new Date().toISOString()
+        };
+
+        eventsList.push(newEvent);
+        await updateEventsList(message.channel, client);
+        
+        const calendarLinks = generateCalendarLinks(newEvent.name, newEvent.dateTime);
+        await say({
+          text: `📅 Event added: "${eventText}" for ${formatDateInTimezone(dateTime)}\n🔗 Add to calendar: ${calendarLinks.googleLink}`
+        });
+      }
+
+      if (text.startsWith('remove event:')) {
+        const eventName = originalText.replace(/^remove event:\s*/i, '').trim().toLowerCase();
+        const eventIndex = eventsList.findIndex(event => 
+          event.name.toLowerCase().includes(eventName)
         );
-        if (index !== -1) {
-          groceryList.splice(index, 1);
-          removedItems.push(item);
+        
+        if (eventIndex !== -1) {
+          const removedEvent = eventsList.splice(eventIndex, 1)[0];
+          await updateEventsList(message.channel, client);
+          await say({
+            text: `✅ Removed event: "${removedEvent.name}"`
+          });
+        } else {
+          await say({
+            text: `❌ Event not found: "${eventName}"`
+          });
         }
-      });
+      }
 
-      if (removedItems.length > 0) {
-        await updateGroceryList(message.channel, client);
-        await say(`✅ Removed from list: ${removedItems.join(', ')}`);
-      } else {
-        await say(`ℹ️ Items not found on list: ${items.join(', ')}`);
+      if (text === 'events') {
+        await updateEventsList(message.channel, client);
       }
     }
 
-    if (text === 'list') {
-      await updateGroceryList(message.channel, client);
-    }
-  }
-
-  // REMIND-ME CHANNEL with timezone-aware parsing
-  if (channelName === 'remind-me') {
-    // Show current time
-    if (text === 'time' || text === 'timezone') {
-      await say(`🕐 Current time: ${getCurrentTimeInTimezone()}\n🌍 Timezone: ${TIMEZONE}`);
-      return;
-    }
-
-    // One-time reminders
-    if (text.startsWith('remind me:') || text.startsWith('remind:')) {
-      const reminderText = originalText.replace(/^remind( me)?:\s*/i, '').trim();
-      const dueDate = parseDateTime(reminderText, TIMEZONE);
-      
-      if (!dueDate) {
-        await say('❌ I couldn\'t understand the date/time. Try: `remind me: take out trash tomorrow at 7pm`\nCurrent time: ' + getCurrentTimeInTimezone());
+    // REMIND-ME CHANNEL
+    if (channelName === 'remind-me') {
+      if (text === 'time' || text === 'timezone') {
+        await say({
+          text: `🕐 Current time: ${getCurrentTimeInTimezone()}\n🌍 Timezone: ${TIMEZONE}`
+        });
         return;
       }
 
-      const newReminder = {
-        id: `reminder_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        message: reminderText,
-        dueDate: dueDate,
-        addedBy: userName,
-        addedAt: new Date().toISOString(),
-        completed: false,
-        sent: false
-      };
-
-      reminders.push(newReminder);
-      await updateRemindersList(message.channel, client);
-      await say(`⏰ Reminder set: "${reminderText}" for ${formatDateInTimezone(dueDate)}`);
-    }
-
-    // Reminders for specific people
-    if (text.startsWith('remind ') && text.includes(':') && !text.startsWith('remind me:')) {
-      const match = originalText.match(/^remind\s+(\w+):\s*(.+)/i);
-      if (match) {
-        const targetUser = match[1];
-        const reminderText = match[2].trim();
+      if (text.startsWith('remind me:') || text.startsWith('remind:')) {
+        const reminderText = originalText.replace(/^remind( me)?:\s*/i, '').trim();
         const dueDate = parseDateTime(reminderText, TIMEZONE);
         
         if (!dueDate) {
-          await say('❌ I couldn\'t understand the date/time. Try: `remind Sam: doctor appointment next Friday at 2pm`\nCurrent time: ' + getCurrentTimeInTimezone());
+          await say({
+            text: `❌ I couldn't understand the date/time. Try: \`remind me: take out trash tomorrow at 7pm\`\nCurrent time: ${getCurrentTimeInTimezone()}`
+          });
           return;
         }
 
@@ -630,7 +779,6 @@ app.message(async ({ message, say, client }) => {
           id: `reminder_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           message: reminderText,
           dueDate: dueDate,
-          targetUser: targetUser,
           addedBy: userName,
           addedAt: new Date().toISOString(),
           completed: false,
@@ -639,109 +787,161 @@ app.message(async ({ message, say, client }) => {
 
         reminders.push(newReminder);
         await updateRemindersList(message.channel, client);
-        await say(`⏰ Reminder set for ${targetUser}: "${reminderText}" for ${formatDateInTimezone(dueDate)}`);
-      }
-    }
-
-    // Recurring reminders (same logic as before)
-    if (text.startsWith('recurring:') || text.startsWith('daily:') || text.startsWith('weekly:') || text.startsWith('monthly:')) {
-      let reminderText, frequency;
-      
-      if (text.startsWith('daily:')) {
-        reminderText = originalText.replace(/^daily:\s*/i, '').trim();
-        frequency = { type: 'daily', cron: '0 8 * * *' };
-      } else if (text.startsWith('weekly:')) {
-        reminderText = originalText.replace(/^weekly:\s*/i, '').trim();
-        frequency = { type: 'weekly', cron: '0 9 * * 1' };
-      } else if (text.startsWith('monthly:')) {
-        reminderText = originalText.replace(/^monthly:\s*/i, '').trim();
-        frequency = { type: 'monthly', cron: '0 9 1 * *' };
-      } else {
-        reminderText = originalText.replace(/^recurring:\s*/i, '').trim();
-        frequency = parseRecurringFrequency(reminderText);
-      }
-      
-      if (!frequency) {
-        await say('❌ I couldn\'t understand the frequency. Try: `recurring: charge Ring battery every 3 months` or `daily: Sam wash your face every morning`');
-        return;
+        await say({
+          text: `⏰ Reminder set: "${reminderText}" for ${formatDateInTimezone(dueDate)}`
+        });
       }
 
-      let targetUser = null;
-      const userMatch = reminderText.match(/^(\w+)[,:]?\s+(.+)/);
-      if (userMatch && !reminderText.toLowerCase().includes('every')) {
-        targetUser = userMatch[1];
-        reminderText = userMatch[2];
+      if (text.startsWith('remind ') && text.includes(':') && !text.startsWith('remind me:')) {
+        const match = originalText.match(/^remind\s+(\w+):\s*(.+)/i);
+        if (match) {
+          const targetUser = match[1];
+          const reminderText = match[2].trim();
+          const dueDate = parseDateTime(reminderText, TIMEZONE);
+          
+          if (!dueDate) {
+            await say({
+              text: `❌ I couldn't understand the date/time. Try: \`remind Sam: doctor appointment next Friday at 2pm\`\nCurrent time: ${getCurrentTimeInTimezone()}`
+            });
+            return;
+          }
+
+          const newReminder = {
+            id: `reminder_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            message: reminderText,
+            dueDate: dueDate,
+            targetUser: targetUser,
+            addedBy: userName,
+            addedAt: new Date().toISOString(),
+            completed: false,
+            sent: false
+          };
+
+          reminders.push(newReminder);
+          await updateRemindersList(message.channel, client);
+          await say({
+            text: `⏰ Reminder set for ${targetUser}: "${reminderText}" for ${formatDateInTimezone(dueDate)}`
+          });
+        }
       }
 
-      const newRecurring = {
-        id: `recurring_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        message: reminderText,
-        frequency: frequency,
-        targetUser: targetUser,
-        addedBy: userName,
-        addedAt: new Date().toISOString(),
-        lastSent: null
-      };
+      if (text.startsWith('recurring:') || text.startsWith('daily:') || text.startsWith('weekly:') || text.startsWith('monthly:')) {
+        let reminderText, frequency;
+        
+        if (text.startsWith('daily:')) {
+          reminderText = originalText.replace(/^daily:\s*/i, '').trim();
+          frequency = { type: 'daily', cron: '0 8 * * *' };
+        } else if (text.startsWith('weekly:')) {
+          reminderText = originalText.replace(/^weekly:\s*/i, '').trim();
+          frequency = { type: 'weekly', cron: '0 9 * * 1' };
+        } else if (text.startsWith('monthly:')) {
+          reminderText = originalText.replace(/^monthly:\s*/i, '').trim();
+          frequency = { type: 'monthly', cron: '0 9 1 * *' };
+        } else {
+          reminderText = originalText.replace(/^recurring:\s*/i, '').trim();
+          frequency = parseRecurringFrequency(reminderText);
+        }
+        
+        if (!frequency) {
+          await say({
+            text: '❌ I couldn\'t understand the frequency. Try: `recurring: charge Ring battery every 3 months` or `daily: Sam wash your face every morning`'
+          });
+          return;
+        }
 
-      recurringReminders.push(newRecurring);
-      await updateRemindersList(message.channel, client);
-      
-      const targetText = targetUser ? ` for ${targetUser}` : '';
-      await say(`🔄 Recurring reminder set${targetText}: "${reminderText}" (${frequency.type})`);
-    }
+        let targetUser = null;
+        const userMatch = reminderText.match(/^(\w+)[,:]?\s+(.+)/);
+        if (userMatch && !reminderText.toLowerCase().includes('every')) {
+          targetUser = userMatch[1];
+          reminderText = userMatch[2];
+        }
 
-    // Remove reminders
-    if (text.startsWith('remove reminder:') || text.startsWith('delete reminder:')) {
-      const searchText = originalText.replace(/^(remove|delete) reminder:\s*/i, '').trim().toLowerCase();
-      
-      const reminderIndex = reminders.findIndex(r => 
-        r.message.toLowerCase().includes(searchText)
-      );
-      
-      if (reminderIndex !== -1) {
-        const removedReminder = reminders.splice(reminderIndex, 1)[0];
+        const newRecurring = {
+          id: `recurring_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          message: reminderText,
+          frequency: frequency,
+          targetUser: targetUser,
+          addedBy: userName,
+          addedAt: new Date().toISOString(),
+          lastSent: null
+        };
+
+        recurringReminders.push(newRecurring);
         await updateRemindersList(message.channel, client);
-        await say(`✅ Removed reminder: "${removedReminder.message}"`);
-        return;
+        
+        const targetText = targetUser ? ` for ${targetUser}` : '';
+        await say({
+          text: `🔄 Recurring reminder set${targetText}: "${reminderText}" (${frequency.type})`
+        });
       }
-      
-      const recurringIndex = recurringReminders.findIndex(r => 
-        r.message.toLowerCase().includes(searchText)
-      );
-      
-      if (recurringIndex !== -1) {
-        const removedRecurring = recurringReminders.splice(recurringIndex, 1)[0];
+
+      if (text.startsWith('remove reminder:') || text.startsWith('delete reminder:')) {
+        const searchText = originalText.replace(/^(remove|delete) reminder:\s*/i, '').trim().toLowerCase();
+        
+        const reminderIndex = reminders.findIndex(r => 
+          r.message.toLowerCase().includes(searchText)
+        );
+        
+        if (reminderIndex !== -1) {
+          const removedReminder = reminders.splice(reminderIndex, 1)[0];
+          await updateRemindersList(message.channel, client);
+          await say({
+            text: `✅ Removed reminder: "${removedReminder.message}"`
+          });
+          return;
+        }
+        
+        const recurringIndex = recurringReminders.findIndex(r => 
+          r.message.toLowerCase().includes(searchText)
+        );
+        
+        if (recurringIndex !== -1) {
+          const removedRecurring = recurringReminders.splice(recurringIndex, 1)[0];
+          await updateRemindersList(message.channel, client);
+          await say({
+            text: `✅ Removed recurring reminder: "${removedRecurring.message}"`
+          });
+          return;
+        }
+        
+        await say({
+          text: `❌ Reminder not found: "${searchText}"`
+        });
+      }
+
+      if (text === 'reminders' || text === 'list reminders') {
         await updateRemindersList(message.channel, client);
-        await say(`✅ Removed recurring reminder: "${removedRecurring.message}"`);
-        return;
       }
-      
-      await say(`❌ Reminder not found: "${searchText}"`);
+
+      if (text.startsWith('test reminder:')) {
+        const testMessage = originalText.replace(/^test reminder:\s*/i, '').trim();
+        
+        const testReminder = {
+          id: `test_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          message: testMessage || 'Test reminder',
+          targetUser: null
+        };
+        
+        await sendReminder(testReminder, client, message.channel);
+        await say({
+          text: '📧 Test reminder sent! Try clicking the buttons.'
+        });
+      }
     }
 
-    if (text === 'reminders' || text === 'list reminders') {
-      await updateRemindersList(message.channel, client);
-    }
-
-    // Test reminder
-    if (text.startsWith('test reminder:')) {
-      const testMessage = originalText.replace(/^test reminder:\s*/i, '').trim();
-      
-      const testReminder = {
-        id: `test_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        message: testMessage || 'Test reminder',
-        targetUser: null
-      };
-      
-      await sendReminder(testReminder, client, message.channel);
-      await say('📧 Test reminder sent! Try clicking the buttons.');
-    }
+  } catch (error) {
+    console.error('Error in message handler:', error);
+    await say({
+      text: `❌ Sorry, something went wrong: ${error.message}`
+    }).catch(console.error);
   }
 });
 
 app.message('hello', async ({ say, message }) => {
   console.log(`Hello from user: ${message.user}`);
-  await say(`Hello! I\'m your home manager bot.\n🕐 Current time: ${getCurrentTimeInTimezone()}\n🌍 Timezone: ${TIMEZONE}\n\n• Try \`buy: milk\` in #groceries\n• Try \`remind me: test in 1 minute\` in #remind-me\n• Try \`time\` to check current time`);
+  await say({
+    text: `Hello! I'm your home manager bot.\n🕐 Current time: ${getCurrentTimeInTimezone()}\n🌍 Timezone: ${TIMEZONE}\n\n• Try \`buy: milk\` in #groceries\n• Try \`event: trip to DE this Friday at 8:00\` in #events\n• Try \`remind me: test in 1 minute\` in #remind-me\n• Try \`time\` to check current time`
+  });
 });
 
 (async () => {
