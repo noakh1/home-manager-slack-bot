@@ -5,6 +5,9 @@ const app = new App({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   socketMode: false
 });
+app.event('url_verification', async ({ body, ack }) => {
+  await ack(body.challenge);
+});
 
 // Storage
 let groceryList = [];
