@@ -57,14 +57,34 @@ let reminderChannelId = null;
 let channelIds = {};
 
 function parseDateTime(text, timezone = TIMEZONE) {
-  const now = new Date();
-  const referenceDate = new Date(now.toLocaleString('en-US', { timeZone: timezone }));
-  
-  const parsed = chrono.parseDate(text, referenceDate);
-  if (parsed) {
-    return parsed.toISOString();
+  try {
+    console.log(`Parsing: "${text}" in timezone: ${timezone}`);
+    
+    // Get current time in the target timezone
+    const now = new Date();
+    const nowInTimezone = new Date(now.toLocaleString('en-US', { timeZone: timezone }));
+    
+    // Parse relative to the timezone-adjusted "now"
+    const parsed = chrono.parseDate(text, nowInTimezone);
+    
+    if (parsed) {
+      // Adjust for timezone offset
+      const offset = now.getTime() - nowInTimezone.getTime();
+      const adjustedDate = new Date(parsed.getTime() + offset);
+      
+      console.log(`Original parsed: ${parsed}`);
+      console.log(`Adjusted for ${timezone}: ${adjustedDate}`);
+      console.log(`Will display as: ${formatDateInTimezone(adjustedDate.toISOString())}`);
+      
+      return adjustedDate.toISOString();
+    }
+    
+    console.log('Could not parse date');
+    return null;
+  } catch (error) {
+    console.error('Error parsing date:', error);
+    return null;
   }
-  return null;
 }
 
 function parseRecurringFrequency(text) {
@@ -634,15 +654,21 @@ app.message(async ({ message, say, client }) => {
     const channelInfo = await client.conversations.info({ channel: message.channel });
     const channelName = channelInfo.channel.name;
     
-    // Better user info handling with fallback
-    let userName = 'Unknown User';
-    try {
-      const userInfo = await client.users.info({ user: message.user });
-      userName = userInfo.user.real_name || userInfo.user.display_name || userInfo.user.name || `User_${message.user}`;
-    } catch (userError) {
-      console.log('Could not get user info for:', message.user, userError.message);
-      userName = `User_${message.user.slice(-4)}`; // Use last 4 chars of user ID as fallback
-    }
+// Ultra-safe user info handling
+let userName = 'Unknown User';
+try {
+  if (message.user && typeof message.user === 'string' && message.user.length > 0) {
+    const userInfo = await client.users.info({ user: message.user });
+    userName = userInfo.user.real_name || userInfo.user.display_name || userInfo.user.name || `User_${message.user}`;
+  }
+} catch (userError) {
+  console.log('Could not get user info, using fallback');
+  if (message.user && typeof message.user === 'string' && message.user.length >= 4) {
+    userName = `User_${message.user.slice(-4)}`;
+  } else {
+    userName = 'System User';
+  }
+}
 
     channelIds[channelName] = message.channel;
 
